@@ -1,0 +1,262 @@
+
+import time
+import sys
+import numpy
+import numpy as np
+import matplotlib.pyplot as plt
+from hmmlearn import hmm
+from MetaTrader5 import *
+import pandas
+import pandas as pd
+import seaborn as sns
+from pykalman import KalmanFilter
+from pypfopt.efficient_frontier import EfficientFrontier
+from pypfopt import risk_models
+from pypfopt import expected_returns
+from pypfopt.discrete_allocation import DiscreteAllocation, get_latest_prices
+import warnings
+import pickle
+from scipy import stats
+PLOT_SHOW=True
+PLOT_TYPE = False
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+min_type=100000000
+min_index=0
+max_type=0
+max_index=0
+size=2000    
+
+def GetMetaData(MetaSymbol,size=1000,time_type=MT5_TIMEFRAME_D1) :  
+
+        MT5Initialize()
+
+        MT5WaitForTerminal()
+
+        rates=MT5CopyRatesFromPos(MetaSymbol, time_type , 0, size)
+
+        MT5Shutdown()
+
+        close =numpy.array( [y.close for y in rates],dtype=int)
+
+        close=close.reshape(-1,1)
+
+        openn =numpy.array( [y.open for y in rates],dtype=int)
+
+        openn=openn.reshape(-1,1)
+
+        high =numpy.array( [y.high for y in rates],dtype=int)
+
+        high=high.reshape(-1,1)
+
+        low =numpy.array( [y.low for y in rates],dtype=int)
+
+        low=low.reshape(-1,1)
+
+        Vol =numpy.array( [y.real_volume for y in rates])
+
+        Vol=Vol.reshape(-1,1)
+
+        tick =numpy.array( [y.tick_volume for y in rates])
+
+        tick=tick.reshape(-1,1)
+
+        spread =numpy.array( [y.spread for y in rates])
+
+        spread=spread.reshape(-1,1)
+
+       
+
+        pure_array=(numpy.concatenate((openn,high,low,close,Vol,tick,spread), axis=1))
+
+        return pure_array
+
+Symbols=[
+
+            'IRX6XTPI0006',
+
+]
+
+SymbolDict={
+    
+    'IRX6XTPI0006':"شاخص کل6",
+
+}
+
+def arr(X,i,size=500):
+    data=[]
+    data=X[:,[i]]
+    data = data.T
+    return data
+
+close_mat = np.empty((0,size))
+train_data=[]
+
+for i in range(len(Symbols)):
+    
+    Symbol=SymbolDict[Symbols[i]]
+    
+    X=numpy.array((GetMetaData(Symbol,size,MT5_TIMEFRAME_D1)),dtype=int)
+
+    close_mat=np.append(close_mat,arr(X,3),axis=0)
+
+def reverse(arr):
+    reversed_arr = arr[::-1]
+    return reversed_arr
+startprob_retune_prior=[0,1]
+for i in range(len(Symbols)):
+    NUM_TEST = 100
+    K = 50
+    NUM_ITERS=5000
+
+    #df_ge=pd.DataFrame({'Close':})
+    data=reverse(close_mat[i,:])
+    data=data.reshape(size,1)
+    #data=df_ge.to_numpy()
+    STOCKS=['data']
+    labels = ['Close']
+    likelihood_vect = np.empty([0,1])
+    aic_vect = np.empty([0,1])
+    bic_vect = np.empty([0,1])
+
+# Possible number of states in Markov Model
+    STATE_SPACE = 2
+    states=2
+    opt_states=2
+# Calculating Mean Absolute Percentage Error of predictions
+    def calc_mape(predicted_data, true_data):
+        return np.divide(np.sum(np.divide(np.absolute(predicted_data - true_data), true_data), 0), true_data.shape[0])
+    def calc_corr(predicted_data, true_data):
+        cor = np.corrcoef(predicted_data,true_data)
+        return cor
+    for stock in STOCKS:
+            dataset = data
+            Symbol=SymbolDict[Symbols[i]]
+            filename=Symbol+'.pkl'
+            predicted_stock_data = np.empty([0,dataset.shape[1]])
+            likelihood_vect = np.empty([0,1])
+            aic_vect = np.empty([0,1])
+            bic_vect = np.empty([0,1])
+            try:
+                model = pickle.load(open(filename, "rb"))
+                train_dataset=train_data.to_numpy()
+            except:
+                #for states in STATE_SPACE:
+                num_params = states**2 + states
+                    #dirichlet_params_states = np.random.randint(1,50,states)
+                from hmmlearn import hmm
+                model = hmm.GaussianHMM(n_components=states, covariance_type='full',algorithm="viterbi",tol=0.0001, n_iter=NUM_ITERS)
+                model.fit(dataset[NUM_TEST:,:])
+                if model.monitor_.iter == NUM_ITERS:
+                    print('Increase number of iterations')
+                    sys.exit(1)
+                try:
+                    likelihood_vect = np.vstack((likelihood_vect,model.score(dataset)))
+                except:
+                    break
+                aic_vect = np.vstack((aic_vect, -2 * model.score(dataset) + 2 * num_params))
+                bic_vect = np.vstack((bic_vect, -2 * model.score(dataset) +  num_params * np.log(dataset.shape[0])))
+            
+                #opt_states = np.argmin(bic_vect) + 2
+                print('number of states are {}'.format(opt_states))
+        
+                for idx in reversed(range(NUM_TEST)):
+                    train_dataset = dataset[idx +1:,:]
+                    test_data = dataset[idx,:]; 
+                    num_examples = train_dataset.shape[0]
+                    if idx == NUM_TEST - 1:
+                        model = hmm.GaussianHMM(n_components=opt_states, covariance_type='full', tol=0.0001, n_iter=NUM_ITERS, init_params='stmc')
+                        model.startprob_=[0,1]
+                    else:
+                        model = hmm.GaussianHMM(n_components=opt_states, covariance_type='full', tol=0.0001, n_iter=NUM_ITERS, init_params='')
+                        model.transmat_ = transmat_retune_prior 
+                        model.startprob_ = startprob_retune_prior=[0,1]
+                        model.means_ = means_retune_prior
+                        model.covars_ = covars_retune_prior
+
+                    model.fit(np.flipud(train_dataset))
+                    pickle.dump(model, open(filename, "wb"))
+                    train_data=train_dataset
+                    transmat_retune_prior = model.transmat_
+                    startprob_retune_prior = model.startprob_=[0,1]
+                    means_retune_prior = model.means_
+                    covars_retune_prior = model.covars_
+
+                    if model.monitor_.iter == NUM_ITERS:
+                        print('Increase number of iterations')
+                        sys.exit(1)
+            for idx in reversed(range(NUM_TEST)):
+                iters = 1
+                past_likelihood = []
+                curr_likelihood = model.score(np.flipud(train_dataset[0:K - 1, :]))
+                while iters < num_examples / K - 1:
+                    past_likelihood = np.append(past_likelihood, model.score(np.flipud(train_dataset[iters:iters + K - 1, :])))
+                    iters = iters + 1
+                likelihood_diff_idx = np.argmin(np.absolute(past_likelihood - curr_likelihood))
+                predicted_change = train_dataset[likelihood_diff_idx,:] - train_dataset[likelihood_diff_idx + 1,:]
+                predicted_stock_data = np.vstack((predicted_stock_data, dataset[idx + 1,:] + predicted_change))
+            
+
+            
+            print()
+            print("startprob")
+            print(startprob_retune_prior)
+            print()
+            hmm= model
+            hidden_states = hmm.predict(train_dataset)
+            mape = calc_mape(predicted_stock_data, np.flipud(dataset[range(100),:]))
+            print('MAPE for the stock {} is '.format(stock),mape)
+            print()
+            corr = calc_corr(predicted_stock_data[:,0], np.flipud(dataset[range(100),0]))
+            print('CORRELATION for the close_price {} is '.format(stock))
+            print(corr)
+            print()
+            print("Transition matrix")
+            print(hmm.transmat_)
+            print()
+            type=[]
+            index=[1,2]
+
+            print("Means and vars of each hidden state:")
+            for ie in range(hmm.n_components):
+                print("{0}th hidden state".format(ie))
+                print("mean = ", hmm.means_[ie])
+                print("var = ", np.diag(model.covars_[ie]))
+                type_number=hmm.means_[ie]/ np.diag(model.covars_[ie])
+                print("type =   ",type_number)
+
+
+                if(type_number > max_type):
+                    max_type =type_number
+                    max_index=ie
+                if(type_number < min_type):
+                    min_type =type_number
+                    min_index=ie
+                print()
+            print("Bear Market : ",min_index)
+            print("Bull Market : ",max_index)
+            print()
+
+            d = pd.DataFrame({'Close': data[:,0]})
+            sns.set(font_scale=1.5)
+            states = (pd.DataFrame(hidden_states, columns=['states'])
+                .join(d, how='inner')
+            )
+
+            #print("input data")
+            #print(states)
+            #middle time dare do ta meghdar moteafaghhay mide 
+            print()
+            d2 = pd.DataFrame({'Close': predicted_stock_data[:,0]})
+            hidden_states2 = model.predict(predicted_stock_data)
+            sns.set(font_scale=1.5)
+            states2 = (pd.DataFrame(hidden_states2, columns=['states'])
+                .join(d2, how='inner')
+            )
+            #print("predicted data")
+            #print(states2)
+            Symbol=SymbolDict[Symbols[i]]
+            print("Tomorrow's price")
+            print(Symbol)
+            print(states2[99:])
+            print('---------------------------------------')
